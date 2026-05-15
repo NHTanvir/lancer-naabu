@@ -615,6 +615,7 @@ dependencies = [
  "pnet_packet 0.35.0",
  "pnet_transport",
  "rand 0.8.6",
+ "regex",
  "serde",
  "serde_json",
  "surge-ping",

@@ -1,5 +1,6 @@
 mod blackrock;
 mod cli;
+mod fingerprint;
 mod host_discovery;
 mod output;
 mod port;
@@ -395,6 +396,64 @@ async fn main() -> Result<()> {
             tracing::warn!("Could not save resume.json: {e}");
         }
         std::fs::remove_file(resume_path).ok();
+    }
+
+    // ── Service version detection (-sV) ─────────────────────────────────────
+    if (cli.service_version || cli.service_discovery) && !results.is_empty() {
+        if !cli.silent {
+            eprintln!("[INFO] Running service version detection on {} open port(s)...", results.len());
+        }
+
+        // Load probe content: custom file or embedded set.
+        let probe_content: String = if let Some(ref path) = cli.sv_probes {
+            match std::fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("Could not read probes file '{}': {} — using embedded probes", path, e);
+                    fingerprint::probes::EMBEDDED_PROBES.to_string()
+                }
+            }
+        } else {
+            fingerprint::probes::EMBEDDED_PROBES.to_string()
+        };
+
+        match fingerprint::FingerprintEngine::from_str(&probe_content) {
+            Ok(engine) => {
+                let sv_timeout = cli.sv_timeout.unwrap_or(cli.timeout);
+                let fast_mode = cli.sv_fast;
+
+                // Run fingerprinting concurrently across open ports.
+                let engine = std::sync::Arc::new(engine);
+                let mut sv_tasks = Vec::with_capacity(results.len());
+
+                for r in &results {
+                    let eng = std::sync::Arc::clone(&engine);
+                    let host = r.host.clone();
+                    let port = r.port.number;
+                    sv_tasks.push(tokio::spawn(async move {
+                        eng.fingerprint(&host, port, sv_timeout, fast_mode).await
+                    }));
+                }
+
+                let sv_results: Vec<Option<fingerprint::ServiceVersion>> =
+                    futures::future::join_all(sv_tasks)
+                        .await
+                        .into_iter()
+                        .map(|r| r.unwrap_or(None))
+                        .collect();
+
+                for (r, sv) in results.iter_mut().zip(sv_results.into_iter()) {
+                    if let Some(sv) = sv {
+                        r.service = Some(sv.service);
+                        r.product = sv.product;
+                        r.version = sv.version;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load fingerprint probes: {}", e);
+            }
+        }
     }
 
     // ── Output ───────────────────────────────────────────────────────────────

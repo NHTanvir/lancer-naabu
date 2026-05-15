@@ -127,6 +127,9 @@ mod inner {
                                         number: src_port,
                                         protocol: crate::port::Protocol::Tcp,
                                     },
+                                    service: None,
+                                    product: None,
+                                    version: None,
                                 });
                             }
                         }

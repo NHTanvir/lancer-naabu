@@ -13,12 +13,15 @@ pub struct FieldSet {
     pub port: bool,
     pub protocol: bool,
     pub ip: bool,
+    pub service: bool,
+    pub product: bool,
+    pub version: bool,
 }
 
 impl FieldSet {
     /// All fields enabled.
     fn all() -> Self {
-        Self { host: true, port: true, protocol: true, ip: true }
+        Self { host: true, port: true, protocol: true, ip: true, service: true, product: true, version: true }
     }
 
     /// Parse `--list-output-fields` / `--exclude-output-fields` into a FieldSet.
@@ -34,12 +37,18 @@ impl FieldSet {
             fs.port = false;
             fs.protocol = false;
             fs.ip = false;
+            fs.service = false;
+            fs.product = false;
+            fs.version = false;
             for field in inc.split(',').map(str::trim) {
                 match field.to_ascii_lowercase().as_str() {
                     "host" => fs.host = true,
                     "port" => fs.port = true,
                     "protocol" => fs.protocol = true,
                     "ip" => fs.ip = true,
+                    "service" => fs.service = true,
+                    "product" => fs.product = true,
+                    "version" => fs.version = true,
                     _ => {}
                 }
             }
@@ -52,6 +61,9 @@ impl FieldSet {
                     "port" => fs.port = false,
                     "protocol" => fs.protocol = false,
                     "ip" => fs.ip = false,
+                    "service" => fs.service = false,
+                    "product" => fs.product = false,
+                    "version" => fs.version = false,
                     _ => {}
                 }
             }
@@ -77,14 +89,6 @@ pub struct OutputConfig {
 // ── Serialisation helpers ────────────────────────────────────────────────────
 
 #[derive(Serialize)]
-struct JsonResultFull<'a> {
-    host: &'a str,
-    port: u16,
-    protocol: &'a str,
-    ip: &'a str,
-}
-
-#[derive(Serialize)]
 struct JsonResultDyn {
     #[serde(skip_serializing_if = "Option::is_none")]
     host: Option<String>,
@@ -94,26 +98,23 @@ struct JsonResultDyn {
     protocol: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     ip: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    service: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    product: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
 }
 
 fn build_json_line(r: &ScanResult, fs: &FieldSet) -> Result<String> {
-    // Fast path: all fields enabled.
-    if fs.host && fs.port && fs.protocol && fs.ip {
-        let ip_str = r.ip.to_string();
-        let obj = JsonResultFull {
-            host: &r.host,
-            port: r.port.number,
-            protocol: &r.port.protocol.to_string(),
-            ip: &ip_str,
-        };
-        return Ok(serde_json::to_string(&obj)?);
-    }
-
     let obj = JsonResultDyn {
-        host: if fs.host { Some(r.host.clone()) } else { None },
-        port: if fs.port { Some(r.port.number) } else { None },
+        host:     if fs.host     { Some(r.host.clone()) }          else { None },
+        port:     if fs.port     { Some(r.port.number) }            else { None },
         protocol: if fs.protocol { Some(r.port.protocol.to_string()) } else { None },
-        ip: if fs.ip { Some(r.ip.to_string()) } else { None },
+        ip:       if fs.ip       { Some(r.ip.to_string()) }         else { None },
+        service:  if fs.service  { r.service.clone() }              else { None },
+        product:  if fs.product  { r.product.clone() }              else { None },
+        version:  if fs.version  { r.version.clone() }              else { None },
     };
     Ok(serde_json::to_string(&obj)?)
 }
@@ -124,6 +125,9 @@ fn build_csv_line(r: &ScanResult, fs: &FieldSet) -> String {
     if fs.port     { fields.push(r.port.number.to_string()); }
     if fs.protocol { fields.push(r.port.protocol.to_string()); }
     if fs.ip       { fields.push(r.ip.to_string()); }
+    if fs.service  { fields.push(r.service.clone().unwrap_or_default()); }
+    if fs.product  { fields.push(r.product.clone().unwrap_or_default()); }
+    if fs.version  { fields.push(r.version.clone().unwrap_or_default()); }
     fields.join(",")
 }
 
@@ -133,6 +137,9 @@ fn build_csv_header(fs: &FieldSet) -> String {
     if fs.port     { fields.push("port"); }
     if fs.protocol { fields.push("protocol"); }
     if fs.ip       { fields.push("ip"); }
+    if fs.service  { fields.push("service"); }
+    if fs.product  { fields.push("product"); }
+    if fs.version  { fields.push("version"); }
     fields.join(",")
 }
 
@@ -166,7 +173,17 @@ pub fn write_results(results: &[ScanResult], cfg: &OutputConfig) -> Result<()> {
         }
     } else {
         for r in results {
-            lines.push(format!("{}:{}", r.host, r.port.number));
+            // Append "(service/version)" suffix when version info is present.
+            let suffix = match (&r.service, &r.product, &r.version) {
+                (Some(svc), Some(prod), Some(ver)) => {
+                    format!(" ({}/{} {})", svc, prod, ver)
+                }
+                (Some(svc), Some(prod), None) => format!(" ({}/{})", svc, prod),
+                (Some(svc), None, Some(ver)) => format!(" ({} {})", svc, ver),
+                (Some(svc), None, None) => format!(" ({})", svc),
+                _ => String::new(),
+            };
+            lines.push(format!("{}:{}{}", r.host, r.port.number, suffix));
         }
     }
 

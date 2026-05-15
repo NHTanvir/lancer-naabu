@@ -226,8 +226,8 @@ pub struct Cli {
     pub sv_workers: Option<usize>,
 
     #[arg(long = "sV-probes", help_heading = "Service-Discovery",
-          help = "Number of service version probes")]
-    pub sv_probes: Option<usize>,
+          help = "Path to nmap-service-probes file (default: embedded minimal set)")]
+    pub sv_probes: Option<String>,
 
     #[arg(long = "udp-probes", help_heading = "Service-Discovery",
           help = "UDP probe strings")]

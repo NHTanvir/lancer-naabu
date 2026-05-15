@@ -177,13 +177,13 @@ impl UdpScanner {
                     match status {
                         Ok(UdpStatus::Open) | Ok(UdpStatus::OpenFiltered) => {
                             debug!("udp reporting open {}:{}", host, port.number);
-                            Some(ScanResult { host, ip, port })
+                            Some(ScanResult { host, ip, port, service: None, product: None, version: None })
                         }
                         Ok(UdpStatus::Closed) => None,
                         Err(e) => {
                             debug!("udp spawn_blocking error {}:{} — {}", host, port.number, e);
                             // Treat spawn failure as open|filtered (conservative).
-                            Some(ScanResult { host, ip, port })
+                            Some(ScanResult { host, ip, port, service: None, product: None, version: None })
                         }
                     }
                 }
