@@ -1,6 +1,8 @@
 mod cli;
+mod host_discovery;
 mod output;
 mod port;
+mod privileges;
 mod resume;
 mod scanner;
 mod target;
@@ -8,6 +10,7 @@ mod target;
 use anyhow::Result;
 use clap::Parser;
 use cli::Cli;
+use host_discovery::{HostDiscoveryConfig, discover_hosts};
 use output::{write_results, OutputConfig};
 use port::resolve_ports;
 use resume::ResumeState;
@@ -86,7 +89,7 @@ async fn main() -> Result<()> {
     info!("resolved {} ports to scan", ports.len());
 
     // ── Resolve targets ──────────────────────────────────────────────────────
-    let targets = resolve_targets(
+    let mut targets = resolve_targets(
         cli.host.as_deref(),
         cli.list.as_deref(),
         cli.no_stdin,
@@ -104,6 +107,56 @@ async fn main() -> Result<()> {
     }
 
     info!("resolved {} target IPs", targets.len());
+
+    // ── Host discovery ───────────────────────────────────────────────────────
+    if cli.host_discovery || cli.with_host_discovery {
+        let hd_cfg = HostDiscoveryConfig {
+            tcp_syn_ports: if cli.probe_tcp_syn { vec![80, 443] } else { vec![80, 443] },
+            tcp_ack_ports: if cli.probe_tcp_ack { vec![80] } else { vec![] },
+            icmp_echo:          cli.probe_icmp_echo,
+            icmp_timestamp:     cli.probe_icmp_timestamp,
+            icmp_address_mask:  cli.probe_icmp_address_mask,
+            arp_ping:           cli.arp_ping,
+            nd_ping:            cli.nd_ping,
+            timeout:            std::time::Duration::from_millis(200),
+            rev_ptr:            cli.rev_ptr,
+            workers:            cli.workers,
+        };
+
+        let raw_ips: Vec<std::net::IpAddr> = targets.iter().map(|t| t.ip).collect();
+        info!("running host discovery on {} targets", raw_ips.len());
+
+        let live = discover_hosts(raw_ips, hd_cfg).await?;
+
+        // -sn / --host-discovery: print live hosts and exit (no port scan).
+        if cli.host_discovery {
+            for h in &live {
+                if let Some(ref ptr) = h.ptr {
+                    println!("{} ({})", h.ip, ptr);
+                } else {
+                    println!("{}", h.ip);
+                }
+            }
+            return Ok(());
+        }
+
+        // -wn / --with-host-discovery: filter targets to live hosts only.
+        let live_ips: std::collections::HashSet<std::net::IpAddr> =
+            live.iter().map(|h| h.ip).collect();
+        targets.retain(|t| live_ips.contains(&t.ip));
+
+        info!(
+            "host discovery complete — {} live host(s) remain",
+            targets.len()
+        );
+
+        if targets.is_empty() {
+            if !cli.silent {
+                eprintln!("[INFO] No live hosts found — nothing to scan.");
+            }
+            return Ok(());
+        }
+    }
 
     // ── Run scanner ──────────────────────────────────────────────────────────
     if cli.scan_type.as_deref().map(|s| s.eq_ignore_ascii_case("SYN")).unwrap_or(false) {
