@@ -1,0 +1,76 @@
+Probe TCP GetRequest q|GET / HTTP/1.0\r\n\r\n|
+rarity 1
+ports 80,8080,8000,8888,3000,5000,8443
+match http m|^HTTP/1\.[01] \d\d\d| p/HTTP/
+match http m|^HTTP/1\.[01] \d\d\d .*Server: Apache| p/Apache httpd/
+match http m|^HTTP/1\.[01] \d\d\d .*Server: nginx| p/nginx/
+match http m|^HTTP/1\.[01] \d\d\d .*Server: Microsoft-IIS| p/Microsoft IIS httpd/
+softmatch http m|^HTTP/|
+
+Probe TCP SSLSessionReq q|\x16\x03\x00\x00i\x01\x00\x00e\x03\x03|
+rarity 1
+ports 443,8443,465,993,995
+match ssl m|^\x16\x03[\x00-\x03]| p/SSL/
+softmatch ssl m|^\x16\x03|
+
+Probe TCP SSHRequest q|SSH-2.0-OpenSSH\r\n|
+rarity 1
+ports 22
+match ssh m|^SSH-2\.0-OpenSSH_([\d.]+p[\d]+)| p/OpenSSH/ v/$1/
+match ssh m|^SSH-2\.0-OpenSSH_([\d.]+)| p/OpenSSH/ v/$1/
+match ssh m|^SSH-2\.0-| p/OpenSSH/
+softmatch ssh m|^SSH-|
+
+Probe TCP SMTPBanner q||
+rarity 1
+ports 25,587,465
+match smtp m|^220 .* ESMTP (Postfix)| p/Postfix smtpd/
+match smtp m|^220 .* Microsoft ESMTP| p/Microsoft ESMTP/
+match smtp m|^220 | p/SMTP/
+softmatch smtp m|^220 |
+
+Probe TCP FTPBanner q||
+rarity 1
+ports 21
+match ftp m|^220 .*(FileZilla Server)| p/FileZilla ftpd/
+match ftp m|^220 .*(vsftpd)| p/vsftpd/
+match ftp m|^220 .*(ProFTPD)| p/ProFTPD/
+match ftp m|^220 | p/FTP/
+softmatch ftp m|^220 |
+
+Probe TCP MySQLBanner q||
+rarity 1
+ports 3306
+match mysql m|^\x...\x0a([\d.]+)| p/MySQL/ v/$1/
+softmatch mysql m|^\x...\x0a|
+
+Probe TCP RedisBanner q|*1\r\n$4\r\nPING\r\n|
+rarity 1
+ports 6379
+match redis m|^\+PONG| p/Redis/
+match redis m|^-NOAUTH| p/Redis/ i/Authentication required/
+softmatch redis m|^\+|
+
+Probe TCP PostgreSQL q|\x00\x00\x00\x08\x04\xd2\x16\x2f|
+rarity 2
+ports 5432
+match postgresql m|^\x4e| p/PostgreSQL/
+softmatch postgresql m|^.|
+
+Probe TCP MongoDBStatus q|\x41\x00\x00\x00\x3a\x30\x00\x00\xff\xff\xff\xff\xd4\x07\x00\x00\x00\x00\x00\x00admin\x2e\x24cmd\x00\x00\x00\x00\x00\xff\xff\xff\xff\x1b\x00\x00\x00\x01serverStatus\x00\x01\x00\x00\x00\x00|
+rarity 2
+ports 27017
+match mongodb m|^\x...\x00\x00\x00| p/MongoDB/
+softmatch mongodb m|^.|
+
+Probe TCP TelnetBanner q||
+rarity 1
+ports 23
+match telnet m|^\xff\xfd| p/Telnet/
+softmatch telnet m|^|
+
+Probe TCP RDPBanner q|\x03\x00\x00\x2c\x27\xe0\x00\x00\x00\x00\x00Cookie: mstshash=nmap\x0d\x0a\x01\x00\x08\x00\x03\x00\x00\x00|
+rarity 2
+ports 3389
+match rdp m|^\x03\x00\x00| p/Microsoft Remote Desktop/
+softmatch rdp m|^\x03|
