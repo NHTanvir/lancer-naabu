@@ -1,6 +1,7 @@
 mod cli;
 mod output;
 mod port;
+mod resume;
 mod scanner;
 mod target;
 
@@ -9,19 +10,19 @@ use clap::Parser;
 use cli::Cli;
 use output::{write_results, OutputConfig};
 use port::resolve_ports;
+use resume::ResumeState;
 use scanner::connect::ConnectScanner;
 use target::resolve_targets;
 use tracing::info;
+
+const RESUME_FILE: &str = "resume.json";
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // ── Logging setup ────────────────────────────────────────────────────────
-    // Silent mode: suppress all log output; only results go to stdout.
-    // Otherwise gate on -debug / -v flags.
     if cli.silent {
-        // Install a no-op subscriber so tracing macros don't panic.
         let _ = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::ERROR)
             .with_writer(std::io::sink)
@@ -42,9 +43,33 @@ async fn main() -> Result<()> {
 
     // ── Version / misc early exits ───────────────────────────────────────────
     if cli.list_output_fields {
-        println!("host\nport\nprotocol");
+        println!("host\nport\nprotocol\nip");
         return Ok(());
     }
+
+    // ── Resume state ─────────────────────────────────────────────────────────
+    // --stream is incompatible with resume; ignore resume flag when streaming.
+    let use_resume = cli.resume && !cli.stream;
+    let resume_path = std::path::Path::new(RESUME_FILE);
+
+    let mut resume_state = if use_resume && resume_path.exists() {
+        match ResumeState::load(resume_path) {
+            Ok(s) => {
+                info!(
+                    "Loaded resume state: {} scanned, {} open",
+                    s.scanned.len(),
+                    s.completed.len()
+                );
+                s
+            }
+            Err(e) => {
+                tracing::warn!("Could not load resume.json: {e} — starting fresh");
+                ResumeState::default()
+            }
+        }
+    } else {
+        ResumeState::default()
+    };
 
     // ── Resolve ports ────────────────────────────────────────────────────────
     let ports = resolve_ports(
@@ -82,8 +107,12 @@ async fn main() -> Result<()> {
 
     // ── Run scanner ──────────────────────────────────────────────────────────
     if cli.scan_type.as_deref().map(|s| s.eq_ignore_ascii_case("SYN")).unwrap_or(false) {
-        eprintln!("Warning: SYN scan is not yet implemented in Phase 0. Falling back to CONNECT.");
+        eprintln!("Warning: SYN scan is not yet implemented. Falling back to CONNECT.");
     }
+
+    // Keep clones for resume book-keeping (scanner takes ownership).
+    let targets_for_resume = if use_resume { targets.clone() } else { vec![] };
+    let ports_for_resume = if use_resume { ports.clone() } else { vec![] };
 
     let scanner = ConnectScanner::new(
         targets,
@@ -94,9 +123,34 @@ async fn main() -> Result<()> {
         cli.retries,
     );
 
-    let results = scanner.run().await?;
+    let mut results = scanner.run().await?;
+
+    // ── Apply resume filtering (skip already-completed open ports) ────────────
+    if use_resume && !resume_state.completed.is_empty() {
+        results.retain(|r| {
+            !resume_state.completed.contains(&format!("{}:{}", r.host, r.port.number))
+        });
+    }
 
     info!("scan complete — {} open ports found", results.len());
+
+    // ── Update resume state ──────────────────────────────────────────────────
+    if use_resume {
+        for t in &targets_for_resume {
+            for p in &ports_for_resume {
+                resume_state.mark_scanned(&t.host, p.number);
+            }
+        }
+        for r in &results {
+            resume_state.mark_open(&r.host, r.port.number);
+        }
+
+        // Save then immediately remove (clean finish).
+        if let Err(e) = resume_state.save(resume_path) {
+            tracing::warn!("Could not save resume.json: {e}");
+        }
+        std::fs::remove_file(resume_path).ok();
+    }
 
     // ── Output ───────────────────────────────────────────────────────────────
     let out_cfg = OutputConfig {
@@ -104,6 +158,8 @@ async fn main() -> Result<()> {
         csv: cli.csv,
         silent: cli.silent,
         output_file: cli.output.clone(),
+        include_fields: cli.output_fields.clone(),
+        exclude_fields: cli.exclude_output_fields.clone(),
     };
 
     write_results(&results, &out_cfg)?;

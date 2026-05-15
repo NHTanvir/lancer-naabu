@@ -106,8 +106,18 @@ fn parse_port_spec(spec: &str) -> Result<Vec<Port>> {
         if token.is_empty() {
             continue;
         }
-        let (proto, rest) = if let Some(stripped) = token.strip_prefix("u:") {
-            (Protocol::Udp, stripped)
+
+        // Handle bare `-` as full range 1-65535
+        if token == "-" {
+            for n in 1u16..=65535 {
+                set.insert(Port { number: n, protocol: Protocol::Tcp });
+            }
+            continue;
+        }
+
+        // Case-insensitive UDP prefix: u: or U:
+        let (proto, rest) = if token.len() >= 2 && token[..2].eq_ignore_ascii_case("u:") {
+            (Protocol::Udp, &token[2..])
         } else {
             (Protocol::Tcp, token)
         };
@@ -193,8 +203,37 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_udp_uppercase() {
+        let ports = parse_port_spec("U:53").unwrap();
+        assert_eq!(ports.len(), 1);
+        assert_eq!(ports[0].number, 53);
+        assert_eq!(ports[0].protocol, Protocol::Udp);
+    }
+
+    #[test]
+    fn test_parse_dash_full_range() {
+        let ports = parse_port_spec("-").unwrap();
+        assert_eq!(ports.len(), 65535);
+        assert_eq!(ports[0].number, 1);
+        assert_eq!(ports[65534].number, 65535);
+    }
+
+    #[test]
     fn test_top100() {
         let ports = resolve_ports(None, Some("100"), None, None).unwrap();
         assert_eq!(ports.len(), 100);
+    }
+
+    #[test]
+    fn test_exclude_ports() {
+        let ports = resolve_ports(Some("80,443,8080"), None, None, Some("443")).unwrap();
+        assert_eq!(ports.len(), 2);
+        assert!(ports.iter().all(|p| p.number != 443));
+    }
+
+    #[test]
+    fn test_comma_list() {
+        let ports = parse_port_spec("80,443,8080").unwrap();
+        assert_eq!(ports.len(), 3);
     }
 }

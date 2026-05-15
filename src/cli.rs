@@ -106,11 +106,15 @@ pub struct Cli {
     pub no_color: bool,
 
     #[arg(long = "list-output-fields", help_heading = "Output",
-          help = "List available output fields")]
+          help = "List available output fields and exit")]
     pub list_output_fields: bool,
 
+    #[arg(long = "output-fields", help_heading = "Output",
+          help = "Comma-separated fields to include in JSON/CSV (host,port,protocol,ip)")]
+    pub output_fields: Option<String>,
+
     #[arg(long = "exclude-output-fields", help_heading = "Output",
-          help = "Comma-separated output fields to exclude")]
+          help = "Comma-separated output fields to exclude from JSON/CSV")]
     pub exclude_output_fields: Option<String>,
 
     // ─── Scan ────────────────────────────────────────────────────────────────
