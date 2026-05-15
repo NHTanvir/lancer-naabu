@@ -571,6 +571,7 @@ dependencies = [
  "anyhow",
  "clap",
  "csv",
+ "dashmap",
  "futures",
  "governor",
  "hickory-resolver",

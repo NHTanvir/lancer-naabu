@@ -17,6 +17,7 @@ ipnet = "2"
 hickory-resolver = { version = "0.24", features = ["tokio-runtime"] }
 futures = "0.3"
 governor = "0.6"
+dashmap = "5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 csv = "1"

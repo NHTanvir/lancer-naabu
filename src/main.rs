@@ -112,10 +112,10 @@ async fn main() -> Result<()> {
 
     // Keep clones for resume book-keeping (scanner takes ownership).
     let targets_for_resume = if use_resume { targets.clone() } else { vec![] };
-    let ports_for_resume = if use_resume { ports.clone() } else { vec![] };
+    let ports_for_resume   = if use_resume { ports.clone()   } else { vec![] };
 
     let mut scanner = ConnectScanner::new(
-        targets,
+        targets.clone(),
         ports,
         cli.rate,
         cli.workers,
@@ -123,20 +123,87 @@ async fn main() -> Result<()> {
         cli.retries,
     );
 
-    // ── Pre-scan: skip already-scanned (host, port) pairs ────────────────────
+    // Wire up --port-threshold.
+    if let Some(t) = cli.port_threshold {
+        scanner.port_threshold = t as usize;
+    }
+
+    // Pre-scan: skip already-scanned (host, port) pairs.
     if use_resume && !resume_state.scanned.is_empty() {
         scanner.skip_pairs = resume_state.scanned.clone();
     }
 
-    let results = scanner.run().await?;
+    let mut results = scanner.run().await?;
 
     info!("scan complete — {} open ports found", results.len());
+
+    // ── Verify pass (--verify) ───────────────────────────────────────────────
+    if cli.verify && !results.is_empty() {
+        if !cli.silent {
+            eprintln!("[INFO] Verifying {} open ports...", results.len());
+        }
+
+        // Build synthetic targets and ports from the first-pass open results.
+        // Each unique (ip, host) pair becomes a target; each open port becomes a
+        // port to re-check.  We run a full second ConnectScanner and keep only
+        // the intersection.
+        use std::collections::HashMap;
+        use crate::port::Port;
+
+        // Deduplicate targets while preserving host label.
+        let mut target_map: HashMap<std::net::IpAddr, target::Target> = HashMap::new();
+        for r in &results {
+            target_map.entry(r.ip).or_insert_with(|| target::Target {
+                host: r.host.clone(),
+                ip:   r.ip,
+            });
+        }
+        let verify_targets: Vec<target::Target> = target_map.into_values().collect();
+
+        // Deduplicate ports.
+        let mut port_set: std::collections::HashSet<u16> = std::collections::HashSet::new();
+        let verify_ports: Vec<Port> = results
+            .iter()
+            .filter_map(|r| {
+                if port_set.insert(r.port.number) {
+                    Some(r.port)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let verify_scanner = ConnectScanner::new(
+            verify_targets,
+            verify_ports,
+            cli.rate,
+            cli.workers,
+            cli.timeout,
+            cli.retries,
+        );
+
+        let verified = verify_scanner.run().await?;
+
+        // Keep only results confirmed by the verify pass.
+        let confirmed: std::collections::HashSet<(String, u16)> = verified
+            .iter()
+            .map(|r| (r.host.clone(), r.port.number))
+            .collect();
+
+        results.retain(|r| confirmed.contains(&(r.host.clone(), r.port.number)));
+
+        if !cli.silent {
+            eprintln!(
+                "[INFO] Verify complete — {} port(s) confirmed open",
+                results.len()
+            );
+        }
+    }
 
     // ── Update resume state ──────────────────────────────────────────────────
     if use_resume {
         for t in &targets_for_resume {
             for p in &ports_for_resume {
-                // Only mark as scanned if this pair was not already in skip_pairs.
                 let key = format!("{}:{}", t.host, p.number);
                 if !resume_state.scanned.contains(&key) {
                     resume_state.mark_scanned(&t.host, p.number);
@@ -147,7 +214,6 @@ async fn main() -> Result<()> {
             resume_state.mark_open(&r.host, r.port.number);
         }
 
-        // Save then immediately remove (clean finish).
         if let Err(e) = resume_state.save(resume_path) {
             tracing::warn!("Could not save resume.json: {e}");
         }
@@ -157,7 +223,7 @@ async fn main() -> Result<()> {
     // ── Output ───────────────────────────────────────────────────────────────
     let out_cfg = OutputConfig {
         json: cli.json,
-        csv: cli.csv,
+        csv:  cli.csv,
         silent: cli.silent,
         output_file: cli.output.clone(),
         include_fields: cli.output_fields.clone(),
