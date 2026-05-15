@@ -252,7 +252,7 @@ async fn main() -> Result<()> {
     // ── Host discovery ───────────────────────────────────────────────────────
     if cli.host_discovery || cli.with_host_discovery {
         let hd_cfg = HostDiscoveryConfig {
-            tcp_syn_ports: if cli.probe_tcp_syn { vec![80, 443] } else { vec![80, 443] },
+            tcp_syn_ports: if cli.probe_tcp_syn { vec![80, 443] } else { vec![] },
             tcp_ack_ports: if cli.probe_tcp_ack { vec![80] } else { vec![] },
             icmp_echo:          cli.probe_icmp_echo,
             icmp_timestamp:     cli.probe_icmp_timestamp,

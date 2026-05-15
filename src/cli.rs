@@ -73,7 +73,7 @@ pub struct Cli {
     pub retries: u32,
 
     #[arg(long = "warm-up-time", help_heading = "Rate/Concurrency",
-          help = "Warm-up time (seconds) before scanning", default_value = "2")]
+          help = "Warm-up time (seconds) before scanning", default_value = "0")]
     pub warm_up_time: u64,
 
     // ─── Output ──────────────────────────────────────────────────────────────
