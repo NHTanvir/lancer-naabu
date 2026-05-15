@@ -1,11 +1,14 @@
 mod blackrock;
 mod cdn;
 mod cli;
+mod dashboard;
 mod fingerprint;
 mod host_discovery;
+mod metrics;
 mod output;
 mod passive;
 mod port;
+mod prediction;
 mod privileges;
 mod resume;
 mod scanner;
@@ -17,11 +20,14 @@ use anyhow::Result;
 use clap::Parser;
 use cli::Cli;
 use host_discovery::{HostDiscoveryConfig, discover_hosts};
+use metrics::{ScanMetrics, start_metrics_server};
 use output::{write_results, OutputConfig};
 use port::{Port, resolve_ports};
+use prediction::build_default_model;
 use resume::ResumeState;
 use scanner::connect::ConnectScanner;
 use scanner::udp_scan::UdpScanner;
+use std::sync::atomic::Ordering;
 use target::{Target, resolve_targets};
 use tracing::info;
 
@@ -77,6 +83,18 @@ async fn main() -> Result<()> {
             .with_max_level(level)
             .with_target(false)
             .init();
+    }
+
+    // ── Metrics server ───────────────────────────────────────────────────────
+    let scan_metrics = ScanMetrics::new();
+    if cli.metrics_port != 0 {
+        start_metrics_server(std::sync::Arc::clone(&scan_metrics), cli.metrics_port).await;
+        if !cli.silent {
+            eprintln!(
+                "[INFO] Prometheus metrics available at http://0.0.0.0:{}/metrics",
+                cli.metrics_port
+            );
+        }
     }
 
     // ── Version / misc early exits ───────────────────────────────────────────
@@ -561,6 +579,87 @@ async fn main() -> Result<()> {
                     .map(|s| s.to_string());
             }
         }
+    }
+
+    // ── Smart-scan (post-scan correlation boost) ─────────────────────────────
+    if cli.smart_scan && !results.is_empty() {
+        let model = build_default_model();
+        let threshold = cli.prediction_threshold as f32 / 100.0;
+
+        // Collect the set of ports that were in the initial scan.
+        let initial_port_set: std::collections::HashSet<u16> =
+            tcp_ports.iter().map(|p| p.number).collect();
+
+        let mut extra_ports: Vec<port::Port> = Vec::new();
+        let mut seen_extra: std::collections::HashSet<u16> = std::collections::HashSet::new();
+
+        for r in &results {
+            if r.port.protocol != port::Protocol::Tcp {
+                continue;
+            }
+            for (port_num, _prob) in model.get_correlated_ports(r.port.number, threshold) {
+                if !initial_port_set.contains(&port_num) && seen_extra.insert(port_num) {
+                    extra_ports.push(port::Port {
+                        number: port_num,
+                        protocol: port::Protocol::Tcp,
+                    });
+                }
+            }
+        }
+
+        if !extra_ports.is_empty() {
+            if !cli.silent {
+                eprintln!(
+                    "[INFO] Smart-scan: probing {} correlated port(s)...",
+                    extra_ports.len()
+                );
+            }
+
+            // Collect unique targets from existing results for the second pass.
+            let mut target_map: std::collections::HashMap<std::net::IpAddr, Target> =
+                std::collections::HashMap::new();
+            for r in &results {
+                target_map.entry(r.ip).or_insert_with(|| Target {
+                    host: r.host.clone(),
+                    ip: r.ip,
+                });
+            }
+            let extra_targets: Vec<Target> = target_map.into_values().collect();
+
+            let mut extra_results = run_connect_scan(
+                extra_targets,
+                extra_ports,
+                cli.rate,
+                cli.workers,
+                cli.timeout,
+                cli.retries,
+                cli.port_threshold,
+                &resume_state,
+                false,
+            )
+            .await?;
+
+            if !cli.silent && !extra_results.is_empty() {
+                eprintln!(
+                    "[INFO] Smart-scan found {} additional open port(s)",
+                    extra_results.len()
+                );
+            }
+            results.append(&mut extra_results);
+        }
+    }
+
+    // ── Update metrics ────────────────────────────────────────────────────────
+    scan_metrics
+        .open_ports_found
+        .store(results.len() as u64, Ordering::Relaxed);
+    scan_metrics
+        .hosts_scanned
+        .store(targets.len() as u64, Ordering::Relaxed);
+
+    // ── Dashboard upload (-pd) ────────────────────────────────────────────────
+    if cli.dashboard {
+        dashboard::upload_results(&results, cli.auth.as_deref()).await?;
     }
 
     // ── Output ───────────────────────────────────────────────────────────────
