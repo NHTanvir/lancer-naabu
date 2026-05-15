@@ -130,6 +130,7 @@ mod inner {
                                     service: None,
                                     product: None,
                                     version: None,
+                                    cdn: None,
                                 });
                             }
                         }

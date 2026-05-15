@@ -17,4 +17,6 @@ pub struct ScanResult {
     pub product: Option<String>,
     /// Version string from service fingerprint (e.g. "8.9p1").
     pub version: Option<String>,
+    /// CDN provider name if the target IP was detected as belonging to a CDN.
+    pub cdn: Option<String>,
 }

@@ -179,7 +179,7 @@ impl ConnectScanner {
                                     c.store(0, Ordering::Relaxed);
                                 }
                                 // Slot was already claimed; just keep it.
-                                return Some(ScanResult { host, ip, port, service: None, product: None, version: None });
+                                return Some(ScanResult { host, ip, port, service: None, product: None, version: None, cdn: None });
                             }
 
                             // ── Connect error ─────────────────────────────────

@@ -16,12 +16,13 @@ pub struct FieldSet {
     pub service: bool,
     pub product: bool,
     pub version: bool,
+    pub cdn: bool,
 }
 
 impl FieldSet {
     /// All fields enabled.
     fn all() -> Self {
-        Self { host: true, port: true, protocol: true, ip: true, service: true, product: true, version: true }
+        Self { host: true, port: true, protocol: true, ip: true, service: true, product: true, version: true, cdn: true }
     }
 
     /// Parse `--list-output-fields` / `--exclude-output-fields` into a FieldSet.
@@ -49,6 +50,7 @@ impl FieldSet {
                     "service" => fs.service = true,
                     "product" => fs.product = true,
                     "version" => fs.version = true,
+                    "cdn" => fs.cdn = true,
                     _ => {}
                 }
             }
@@ -64,6 +66,7 @@ impl FieldSet {
                     "service" => fs.service = false,
                     "product" => fs.product = false,
                     "version" => fs.version = false,
+                    "cdn" => fs.cdn = false,
                     _ => {}
                 }
             }
@@ -84,6 +87,8 @@ pub struct OutputConfig {
     pub include_fields: Option<String>,
     /// Fields to exclude (None = none excluded).
     pub exclude_fields: Option<String>,
+    /// Annotate CDN hosts with provider name in output.
+    pub display_cdn: bool,
 }
 
 // ── Serialisation helpers ────────────────────────────────────────────────────
@@ -104,17 +109,20 @@ struct JsonResultDyn {
     product: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cdn: Option<String>,
 }
 
 fn build_json_line(r: &ScanResult, fs: &FieldSet) -> Result<String> {
     let obj = JsonResultDyn {
-        host:     if fs.host     { Some(r.host.clone()) }          else { None },
-        port:     if fs.port     { Some(r.port.number) }            else { None },
+        host:     if fs.host     { Some(r.host.clone()) }             else { None },
+        port:     if fs.port     { Some(r.port.number) }               else { None },
         protocol: if fs.protocol { Some(r.port.protocol.to_string()) } else { None },
-        ip:       if fs.ip       { Some(r.ip.to_string()) }         else { None },
-        service:  if fs.service  { r.service.clone() }              else { None },
-        product:  if fs.product  { r.product.clone() }              else { None },
-        version:  if fs.version  { r.version.clone() }              else { None },
+        ip:       if fs.ip       { Some(r.ip.to_string()) }            else { None },
+        service:  if fs.service  { r.service.clone() }                 else { None },
+        product:  if fs.product  { r.product.clone() }                 else { None },
+        version:  if fs.version  { r.version.clone() }                 else { None },
+        cdn:      if fs.cdn      { r.cdn.clone() }                     else { None },
     };
     Ok(serde_json::to_string(&obj)?)
 }
@@ -128,6 +136,7 @@ fn build_csv_line(r: &ScanResult, fs: &FieldSet) -> String {
     if fs.service  { fields.push(r.service.clone().unwrap_or_default()); }
     if fs.product  { fields.push(r.product.clone().unwrap_or_default()); }
     if fs.version  { fields.push(r.version.clone().unwrap_or_default()); }
+    if fs.cdn      { fields.push(r.cdn.clone().unwrap_or_default()); }
     fields.join(",")
 }
 
@@ -140,6 +149,7 @@ fn build_csv_header(fs: &FieldSet) -> String {
     if fs.service  { fields.push("service"); }
     if fs.product  { fields.push("product"); }
     if fs.version  { fields.push("version"); }
+    if fs.cdn      { fields.push("cdn"); }
     fields.join(",")
 }
 
@@ -183,7 +193,13 @@ pub fn write_results(results: &[ScanResult], cfg: &OutputConfig) -> Result<()> {
                 (Some(svc), None, None) => format!(" ({})", svc),
                 _ => String::new(),
             };
-            lines.push(format!("{}:{}{}", r.host, r.port.number, suffix));
+            // Append "[CDN:Provider]" when --display-cdn is set and CDN was detected.
+            let cdn_tag = if cfg.display_cdn {
+                r.cdn.as_deref().map(|p| format!(" [CDN:{}]", p)).unwrap_or_default()
+            } else {
+                String::new()
+            };
+            lines.push(format!("{}:{}{}{}", r.host, r.port.number, suffix, cdn_tag));
         }
     }
 

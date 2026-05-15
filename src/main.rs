@@ -1,12 +1,15 @@
 mod blackrock;
+mod cdn;
 mod cli;
 mod fingerprint;
 mod host_discovery;
 mod output;
+mod passive;
 mod port;
 mod privileges;
 mod resume;
 mod scanner;
+mod service_map;
 mod target;
 mod udp_probes;
 
@@ -190,6 +193,59 @@ async fn main() -> Result<()> {
         }
     }
 
+    // ── Passive mode (--passive) ─────────────────────────────────────────────
+    if cli.passive {
+        if !cli.silent {
+            eprintln!("[INFO] Passive mode: querying Shodan InternetDB for {} target(s)...", targets.len());
+        }
+
+        let mut passive_results: Vec<scanner::ScanResult> = Vec::new();
+
+        for t in &targets {
+            match passive::query_internetdb(t.ip).await {
+                Ok(Some(idb)) => {
+                    for p in idb.ports {
+                        passive_results.push(scanner::ScanResult {
+                            host: t.host.clone(),
+                            ip: t.ip,
+                            port: port::Port {
+                                number: p,
+                                protocol: port::Protocol::Tcp,
+                            },
+                            service: None,
+                            product: None,
+                            version: None,
+                            cdn: None,
+                        });
+                    }
+                    if !cli.silent && !idb.hostnames.is_empty() {
+                        eprintln!("[INFO] {} hostnames: {}", t.ip, idb.hostnames.join(", "));
+                    }
+                }
+                Ok(None) => {
+                    if !cli.silent {
+                        eprintln!("[INFO] {} — no InternetDB record found", t.ip);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("InternetDB query failed for {}: {}", t.ip, e);
+                }
+            }
+        }
+
+        let out_cfg = OutputConfig {
+            json: cli.json,
+            csv: cli.csv,
+            silent: cli.silent,
+            output_file: cli.output.clone(),
+            include_fields: cli.output_fields.clone(),
+            exclude_fields: cli.exclude_output_fields.clone(),
+            display_cdn: cli.display_cdn,
+        };
+        write_results(&passive_results, &out_cfg)?;
+        return Ok(());
+    }
+
     // ── Split TCP / UDP ports ────────────────────────────────────────────────
     use port::Protocol;
 
@@ -314,6 +370,44 @@ async fn main() -> Result<()> {
     }
 
     info!("scan complete — {} open ports found", results.len());
+
+    // ── CDN detection (--exclude-cdn / --display-cdn) ────────────────────────
+    if cli.exclude_cdn || cli.display_cdn {
+        let checker = cdn::CdnChecker::new();
+        for r in results.iter_mut() {
+            if let Some(m) = checker.check(r.ip) {
+                r.cdn = Some(m.provider.clone());
+            }
+        }
+
+        if cli.exclude_cdn {
+            let cdn_ports: Vec<port::Port> = vec![
+                port::Port { number: 80,  protocol: port::Protocol::Tcp },
+                port::Port { number: 443, protocol: port::Protocol::Tcp },
+            ];
+            // For CDN hosts, keep only 80/443 results; for non-CDN, keep all.
+            // Also log which hosts are being throttled.
+            let mut cdn_hosts_seen = std::collections::HashSet::new();
+            results.retain(|r| {
+                if r.cdn.is_some() {
+                    let keep = cdn_ports.iter().any(|cp| cp.number == r.port.number);
+                    if !cdn_hosts_seen.contains(&r.ip) {
+                        cdn_hosts_seen.insert(r.ip);
+                        if !cli.silent {
+                            eprintln!(
+                                "[INFO] Skipping full scan for CDN host {} ({}) — scanning 80/443 only",
+                                r.ip,
+                                r.cdn.as_deref().unwrap_or("CDN")
+                            );
+                        }
+                    }
+                    keep
+                } else {
+                    true
+                }
+            });
+        }
+    }
 
     // ── Verify pass (--verify) ───────────────────────────────────────────────
     if cli.verify && !results.is_empty() {
@@ -456,6 +550,19 @@ async fn main() -> Result<()> {
         }
     }
 
+    // ── Service discovery (-sD) without full -sV ─────────────────────────────
+    // Fill in service name via static map for any port that doesn't already
+    // have a service set from the fingerprint engine.
+    if cli.service_discovery && !results.is_empty() {
+        for r in results.iter_mut() {
+            if r.service.is_none() {
+                let proto_str = r.port.protocol.to_string();
+                r.service = service_map::guess_service(r.port.number, &proto_str)
+                    .map(|s| s.to_string());
+            }
+        }
+    }
+
     // ── Output ───────────────────────────────────────────────────────────────
     let out_cfg = OutputConfig {
         json: cli.json,
@@ -464,6 +571,7 @@ async fn main() -> Result<()> {
         output_file: cli.output.clone(),
         include_fields: cli.output_fields.clone(),
         exclude_fields: cli.exclude_output_fields.clone(),
+        display_cdn: cli.display_cdn,
     };
 
     write_results(&results, &out_cfg)?;
