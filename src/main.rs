@@ -114,7 +114,7 @@ async fn main() -> Result<()> {
     let targets_for_resume = if use_resume { targets.clone() } else { vec![] };
     let ports_for_resume = if use_resume { ports.clone() } else { vec![] };
 
-    let scanner = ConnectScanner::new(
+    let mut scanner = ConnectScanner::new(
         targets,
         ports,
         cli.rate,
@@ -123,14 +123,12 @@ async fn main() -> Result<()> {
         cli.retries,
     );
 
-    let mut results = scanner.run().await?;
-
-    // ── Apply resume filtering (skip already-completed open ports) ────────────
-    if use_resume && !resume_state.completed.is_empty() {
-        results.retain(|r| {
-            !resume_state.completed.contains(&format!("{}:{}", r.host, r.port.number))
-        });
+    // ── Pre-scan: skip already-scanned (host, port) pairs ────────────────────
+    if use_resume && !resume_state.scanned.is_empty() {
+        scanner.skip_pairs = resume_state.scanned.clone();
     }
+
+    let results = scanner.run().await?;
 
     info!("scan complete — {} open ports found", results.len());
 
@@ -138,7 +136,11 @@ async fn main() -> Result<()> {
     if use_resume {
         for t in &targets_for_resume {
             for p in &ports_for_resume {
-                resume_state.mark_scanned(&t.host, p.number);
+                // Only mark as scanned if this pair was not already in skip_pairs.
+                let key = format!("{}:{}", t.host, p.number);
+                if !resume_state.scanned.contains(&key) {
+                    resume_state.mark_scanned(&t.host, p.number);
+                }
             }
         }
         for r in &results {

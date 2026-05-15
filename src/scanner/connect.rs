@@ -6,6 +6,7 @@ use futures::stream::{self, StreamExt};
 use governor::{Quota, RateLimiter};
 use governor::clock::DefaultClock;
 use governor::state::{InMemoryState, NotKeyed};
+use std::collections::HashSet;
 use std::net::IpAddr;
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -22,6 +23,7 @@ pub struct ConnectScanner {
     workers: usize,
     timeout_ms: u64,
     retries: u32,
+    pub skip_pairs: HashSet<String>,
 }
 
 impl ConnectScanner {
@@ -33,12 +35,15 @@ impl ConnectScanner {
         timeout_ms: u64,
         retries: u32,
     ) -> Self {
-        Self { targets, ports, rate, workers, timeout_ms, retries }
+        Self { targets, ports, rate, workers, timeout_ms, retries, skip_pairs: HashSet::new() }
     }
 
     pub async fn run(self) -> Result<Vec<ScanResult>> {
+        // Destructure self up-front so we can move fields independently.
+        let Self { targets, ports, rate, workers, timeout_ms, retries, skip_pairs } = self;
+
         // Warn if any UDP ports were requested — they are not supported in CONNECT mode.
-        let udp_count = self.ports.iter().filter(|p| p.protocol == Protocol::Udp).count();
+        let udp_count = ports.iter().filter(|p| p.protocol == Protocol::Udp).count();
         if udp_count > 0 {
             tracing::warn!(
                 "{} UDP port(s) skipped (UDP not supported in CONNECT scan mode)",
@@ -46,24 +51,27 @@ impl ConnectScanner {
             );
         }
 
-        let rate = self.rate.max(1);
+        let rate = rate.max(1);
         let quota = Quota::per_second(NonZeroU32::new(rate).unwrap());
         let limiter: Arc<DirectLimiter> = Arc::new(RateLimiter::direct(quota));
-        let timeout_ms = self.timeout_ms;
-        let retries = self.retries;
 
-        // Build a flat list of (ip, host_label, port) pairs — only TCP.
-        let scan_pairs: Vec<(IpAddr, String, Port)> = self
-            .targets
+        // Build a flat list of (ip, host_label, port) pairs — only TCP, minus already-scanned.
+        let scan_pairs: Vec<(IpAddr, String, Port)> = targets
             .iter()
             .flat_map(|t| {
                 let ip = t.ip;
                 let host = t.host.clone();
-                self.ports.iter().filter_map(move |p| {
-                    if p.protocol != Protocol::Tcp {
-                        return None;
+                ports.iter().filter_map({
+                    let skip = &skip_pairs;
+                    move |p| {
+                        if p.protocol != Protocol::Tcp {
+                            return None;
+                        }
+                        if skip.contains(&format!("{}:{}", host, p.number)) {
+                            return None;
+                        }
+                        Some((ip, host.clone(), *p))
                     }
-                    Some((ip, host.clone(), *p))
                 })
             })
             .collect();
@@ -116,7 +124,7 @@ impl ConnectScanner {
                     None
                 }
             })
-            .buffer_unordered(self.workers) // only `workers` futures in flight at once
+            .buffer_unordered(workers) // only `workers` futures in flight at once
             .filter_map(|r| async move { r })
             .collect()
             .await;
