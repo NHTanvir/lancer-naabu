@@ -41,11 +41,6 @@ async fn main() -> Result<()> {
     }
 
     // ── Version / misc early exits ───────────────────────────────────────────
-    if cli.version_flag {
-        println!("lancer-naabu {}", env!("CARGO_PKG_VERSION"));
-        return Ok(());
-    }
-
     if cli.list_output_fields {
         println!("host\nport\nprotocol");
         return Ok(());
@@ -86,6 +81,10 @@ async fn main() -> Result<()> {
     info!("resolved {} target IPs", targets.len());
 
     // ── Run scanner ──────────────────────────────────────────────────────────
+    if cli.scan_type.as_deref().map(|s| s.eq_ignore_ascii_case("SYN")).unwrap_or(false) {
+        eprintln!("Warning: SYN scan is not yet implemented in Phase 0. Falling back to CONNECT.");
+    }
+
     let scanner = ConnectScanner::new(
         targets,
         ports,

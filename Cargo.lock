@@ -571,6 +571,7 @@ dependencies = [
  "anyhow",
  "clap",
  "csv",
+ "futures",
  "governor",
  "hickory-resolver",
  "ipnet",

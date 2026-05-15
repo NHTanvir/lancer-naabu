@@ -105,10 +105,6 @@ pub struct Cli {
           help = "Disable color output")]
     pub no_color: bool,
 
-    #[arg(long = "version-flag", help_heading = "Output",
-          help = "Print version and exit")]
-    pub version_flag: bool,
-
     #[arg(long = "list-output-fields", help_heading = "Output",
           help = "List available output fields")]
     pub list_output_fields: bool,
