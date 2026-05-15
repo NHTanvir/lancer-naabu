@@ -12,7 +12,13 @@ clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 tracing = "0.1"
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ipnet = "2"
+hickory-resolver = { version = "0.24", features = ["tokio-runtime"] }
+governor = "0.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+csv = "1"
 
 [profile.release]
 opt-level = 3
