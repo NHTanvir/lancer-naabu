@@ -15,6 +15,7 @@ use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::time::Duration;
 use tracing::debug;
+use tokio::io::AsyncWriteExt;
 
 type DirectLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
 
@@ -34,6 +35,10 @@ pub struct ConnectScanner {
     per_host_rate: Option<u32>,
     /// Stop scanning a host once this many open ports are found (0 = disabled).
     pub port_threshold: usize,
+    /// Bind source IP for outgoing TCP connections (CONNECT mode).
+    pub source_ip: Option<IpAddr>,
+    /// Payload to send after connecting (for banner-grab triggering).
+    pub connect_payload: Option<String>,
 }
 
 impl ConnectScanner {
@@ -55,6 +60,8 @@ impl ConnectScanner {
             skip_pairs: HashSet::new(),
             per_host_rate: None,
             port_threshold: 0,
+            source_ip: None,
+            connect_payload: None,
         }
     }
 
@@ -69,7 +76,12 @@ impl ConnectScanner {
             skip_pairs,
             per_host_rate: _,
             port_threshold,
+            source_ip,
+            connect_payload,
         } = self;
+        let connect_payload: Option<Arc<Vec<u8>>> = connect_payload
+            .map(|s| Arc::new(s.into_bytes()));
+        let source_ip: Option<IpAddr> = source_ip;
 
         let udp_count = ports.iter().filter(|p| p.protocol == Protocol::Udp).count();
         if udp_count > 0 {
@@ -115,11 +127,15 @@ impl ConnectScanner {
         // Helper: get-or-create an Arc<AtomicUsize> from a DashMap.
         // We inline this inline where needed — see closures below.
 
+        let connect_payload_arc = connect_payload.clone();
+        let source_ip_opt = source_ip;
+
         let mut open_ports: Vec<ScanResult> = stream::iter(scan_pairs)
             .map(|(ip, host, port)| {
-                let limiter      = Arc::clone(&limiter);
-                let open_counts  = Arc::clone(&open_counts);
-                let err_counts   = Arc::clone(&err_counts);
+                let limiter           = Arc::clone(&limiter);
+                let open_counts       = Arc::clone(&open_counts);
+                let err_counts        = Arc::clone(&err_counts);
+                let payload           = connect_payload_arc.clone();
                 async move {
                     // ── Adaptive backoff guard ───────────────────────────────
                     {
@@ -165,14 +181,42 @@ impl ConnectScanner {
                     for attempt in 0..=retries {
                         limiter.until_ready().await;
 
-                        match tokio::time::timeout(
-                            Duration::from_millis(timeout_ms),
-                            TcpStream::connect(addr),
-                        )
-                        .await
+                        // Build a fresh connect future each iteration.
+                        let connect_fut = async {
+                            if let Some(src) = source_ip_opt {
+                                let bind_addr = std::net::SocketAddr::new(src, 0);
+                                let sock = match src {
+                                    IpAddr::V4(_) => tokio::net::TcpSocket::new_v4(),
+                                    IpAddr::V6(_) => tokio::net::TcpSocket::new_v6(),
+                                };
+                                match sock {
+                                    Ok(s) => {
+                                        if let Err(e) = s.bind(bind_addr) {
+                                            debug!("source-ip bind failed for {}: {}", bind_addr, e);
+                                            TcpStream::connect(addr).await
+                                        } else {
+                                            s.connect(addr).await
+                                        }
+                                    }
+                                    Err(_) => TcpStream::connect(addr).await,
+                                }
+                            } else {
+                                TcpStream::connect(addr).await
+                            }
+                        };
+
+                        match tokio::time::timeout(Duration::from_millis(timeout_ms), connect_fut).await
                         {
                             // ── Open ─────────────────────────────────────────
-                            Ok(Ok(_)) => {
+                            Ok(Ok(mut stream)) => {
+                                // TLS detection stub
+                                if std::env::var("ENABLE_TLS_DETECTION").ok().as_deref() == Some("true") {
+                                    tracing::debug!("TLS detection enabled but feature not compiled in");
+                                }
+                                // Send connect payload if configured.
+                                if let Some(ref p) = payload {
+                                    let _ = stream.write_all(p.as_slice()).await;
+                                }
                                 debug!("open  {}:{}", host, port.number);
                                 // Reset error counter for this host.
                                 if let Some(c) = err_counts.get(&ip) {

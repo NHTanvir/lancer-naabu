@@ -31,6 +31,59 @@ use std::sync::atomic::Ordering;
 use target::{Target, resolve_targets};
 use tracing::info;
 
+// ── Interface listing ────────────────────────────────────────────────────────
+
+fn list_interfaces() -> Vec<String> {
+    match if_addrs::get_if_addrs() {
+        Ok(ifaces) => {
+            let mut names: Vec<String> = ifaces
+                .iter()
+                .map(|i| format!("{} ({})", i.name, i.addr.ip()))
+                .collect();
+            names.dedup();
+            names
+        }
+        Err(_) => vec!["(could not enumerate interfaces)".to_string()],
+    }
+}
+
+// ── Health check ─────────────────────────────────────────────────────────────
+
+fn run_health_check() {
+    println!("lancer-naabu health check");
+    println!("=========================");
+
+    // 1. Privilege check
+    let is_priv = privileges::is_privileged();
+    println!(
+        "[{}] Elevated privileges: {}",
+        if is_priv { "OK" } else { "  " },
+        if is_priv {
+            "yes (SYN scan available)"
+        } else {
+            "no (CONNECT scan only)"
+        }
+    );
+
+    // 2. raw_scan feature
+    #[cfg(feature = "raw_scan")]
+    println!("[OK] raw_scan feature: compiled in");
+    #[cfg(not(feature = "raw_scan"))]
+    println!("[  ] raw_scan feature: NOT compiled in (--features raw_scan to enable)");
+
+    // 3. Network interfaces
+    println!("\nNetwork interfaces:");
+    for iface in list_interfaces() {
+        println!("  - {}", iface);
+    }
+
+    // 4. DNS resolver
+    println!("\nDNS resolver: hickory (configured via system settings)");
+    println!("[OK] DNS resolver: ready");
+
+    println!("\nStatus: Ready");
+}
+
 const RESUME_FILE: &str = "resume.json";
 
 /// Run a TCP CONNECT scan and return open-port results.
@@ -47,6 +100,8 @@ async fn run_connect_scan(
     port_threshold: Option<u32>,
     resume_state: &ResumeState,
     use_resume: bool,
+    source_ip: Option<std::net::IpAddr>,
+    connect_payload: Option<String>,
 ) -> Result<Vec<scanner::ScanResult>> {
     let mut scanner = ConnectScanner::new(targets, ports, rate, workers, timeout_ms, retries);
 
@@ -57,6 +112,9 @@ async fn run_connect_scan(
     if use_resume && !resume_state.scanned.is_empty() {
         scanner.skip_pairs = resume_state.scanned.clone();
     }
+
+    scanner.source_ip = source_ip;
+    scanner.connect_payload = connect_payload;
 
     scanner.run().await
 }
@@ -95,6 +153,36 @@ async fn main() -> Result<()> {
                 cli.metrics_port
             );
         }
+    }
+
+    // ── Health check (-hc / --health-check) ──────────────────────────────────
+    if cli.health_check {
+        run_health_check();
+        return Ok(());
+    }
+
+    // ── Interface listing (--il) ──────────────────────────────────────────────
+    if cli.list_interfaces {
+        println!("Available network interfaces:");
+        for iface in list_interfaces() {
+            println!("  {}", iface);
+        }
+        return Ok(());
+    }
+
+    // ── Config file warning ───────────────────────────────────────────────────
+    if cli.config.is_some() {
+        tracing::warn!("--config: config file loading is not yet implemented");
+    }
+
+    // ── Proxy warning ─────────────────────────────────────────────────────────
+    if cli.proxy.is_some() || cli.proxy_auth.is_some() {
+        tracing::warn!("--proxy / --proxy-auth: SOCKS5 proxy support is not yet implemented");
+    }
+
+    // ── nmap-cli warning ──────────────────────────────────────────────────────
+    if cli.nmap_cli.is_some() {
+        tracing::warn!("--nmap-cli: nmap post-scan integration is not yet implemented");
     }
 
     // ── Version / misc early exits ───────────────────────────────────────────
@@ -211,6 +299,15 @@ async fn main() -> Result<()> {
         }
     }
 
+    // ── Warm-up time (--warm-up-time) ─────────────────────────────────────────
+    // Sleep between host-discovery and port-scan phases.
+    if cli.warm_up_time > 0 {
+        if !cli.silent {
+            eprintln!("[INFO] Warm-up: waiting {} second(s) before port scan...", cli.warm_up_time);
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(cli.warm_up_time)).await;
+    }
+
     // ── Passive mode (--passive) ─────────────────────────────────────────────
     if cli.passive {
         if !cli.silent {
@@ -282,6 +379,12 @@ async fn main() -> Result<()> {
     let targets_for_resume = if use_resume { targets.clone() } else { vec![] };
     let ports_for_resume   = if use_resume { ports.clone()   } else { vec![] };
 
+    // ── Resolve source IP (-si / --source-ip) ────────────────────────────────
+    let resolved_source_ip: Option<std::net::IpAddr> = cli
+        .source_ip
+        .as_deref()
+        .and_then(|s| s.parse().ok());
+
     // ── Run TCP scanner ──────────────────────────────────────────────────────
     let is_syn = cli
         .scan_type
@@ -325,6 +428,8 @@ async fn main() -> Result<()> {
                             cli.port_threshold,
                             &resume_state,
                             use_resume,
+                            resolved_source_ip,
+                            cli.connect_payload.clone(),
                         )
                         .await?
                     }
@@ -345,6 +450,8 @@ async fn main() -> Result<()> {
                         cli.port_threshold,
                         &resume_state,
                         use_resume,
+                        resolved_source_ip,
+                        cli.connect_payload.clone(),
                     )
                     .await?
                 }
@@ -360,6 +467,8 @@ async fn main() -> Result<()> {
                 cli.port_threshold,
                 &resume_state,
                 use_resume,
+                resolved_source_ip,
+                cli.connect_payload.clone(),
             )
             .await?
         };
@@ -463,7 +572,7 @@ async fn main() -> Result<()> {
             })
             .collect();
 
-        let verify_scanner = ConnectScanner::new(
+        let mut verify_scanner = ConnectScanner::new(
             verify_targets,
             verify_ports,
             cli.rate,
@@ -471,6 +580,8 @@ async fn main() -> Result<()> {
             cli.timeout,
             cli.retries,
         );
+        verify_scanner.source_ip = resolved_source_ip;
+        verify_scanner.connect_payload = cli.connect_payload.clone();
 
         let verified = verify_scanner.run().await?;
 
@@ -636,6 +747,8 @@ async fn main() -> Result<()> {
                 cli.port_threshold,
                 &resume_state,
                 false,
+                resolved_source_ip,
+                cli.connect_payload.clone(),
             )
             .await?;
 

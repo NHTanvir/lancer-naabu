@@ -7,6 +7,14 @@ authors = ["NHTanvir <naymulhasantanvir10@gmail.com>"]
 license = "MIT"
 repository = "https://github.com/NHTanvir/lancer-naabu"
 
+[lib]
+name = "lancer_naabu"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lancer-naabu"
+path = "src/main.rs"
+
 [features]
 default = []
 raw_scan = ["pnet", "pnet_packet", "pnet_datalink", "pnet_transport"]
@@ -35,6 +43,7 @@ pnet = { version = "0.35", optional = true }
 pnet_packet = { version = "0.35", optional = true }
 pnet_datalink = { version = "0.35", optional = true }
 pnet_transport = { version = "0.35", optional = true }
+if-addrs = "0.13"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

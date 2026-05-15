@@ -1,0 +1,12 @@
+This project = a naabu clone in Rust ("lancerscan").
+- Default scan: TCP CONNECT (no privileges). SYN scan via pnet + libpcap, gated on CAP_NET_RAW / admin / BPF.
+- Hardcode NmapTop100, NmapTop1000 verbatim from upstream pkg/runner/ports.go.
+- Embed nmap-service-probes via include_str! for -sV.
+- Rate-limit via governor (per-host + global). Default -rate is conservative (issue #1685: high rates miss opens).
+- Pcap receive in a dedicated thread → tokio mpsc → result fan-out.
+- Use Blackrock Feistel shuffle (port the ~50 LOC) for IP×Port permutation order.
+- 8 ICMP write workers (naabu #1672 fix).
+- Library API in lib.rs (Scanner::scan returns Vec<ScanResult>); Lancer §37 imports.
+- ENABLE_TLS_DETECTION env-var triggers TLS handshake on opens.
+- Output is always sorted host:port, also JSON/CSV with field control.
+- NEVER block on a single slow target — per-port timeout + per-host port-threshold + overall ctx cancellation.

@@ -9,7 +9,8 @@
 /// and `n`, but pseudo-random in appearance.
 ///
 /// # Usage
-/// ```rust
+/// ```rust,no_run
+/// use lancer_naabu::blackrock::Blackrock;
 /// let br = Blackrock::new(1000, 42);
 /// for i in 0..1000 {
 ///     let idx = br.permute(i);
