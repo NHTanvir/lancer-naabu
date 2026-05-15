@@ -7,6 +7,7 @@ mod privileges;
 mod resume;
 mod scanner;
 mod target;
+mod udp_probes;
 
 use anyhow::Result;
 use clap::Parser;
@@ -16,6 +17,7 @@ use output::{write_results, OutputConfig};
 use port::{Port, resolve_ports};
 use resume::ResumeState;
 use scanner::connect::ConnectScanner;
+use scanner::udp_scan::UdpScanner;
 use target::{Target, resolve_targets};
 use tracing::info;
 
@@ -187,43 +189,80 @@ async fn main() -> Result<()> {
         }
     }
 
-    // ── Run scanner ──────────────────────────────────────────────────────────
+    // ── Split TCP / UDP ports ────────────────────────────────────────────────
+    use port::Protocol;
+
+    let tcp_ports: Vec<port::Port> = ports
+        .iter()
+        .filter(|p| p.protocol == Protocol::Tcp)
+        .cloned()
+        .collect();
+    let udp_ports: Vec<port::Port> = ports
+        .iter()
+        .filter(|p| p.protocol == Protocol::Udp)
+        .cloned()
+        .collect();
+
+    // Keep clones for resume book-keeping (scanner takes ownership).
+    let targets_for_resume = if use_resume { targets.clone() } else { vec![] };
+    let ports_for_resume   = if use_resume { ports.clone()   } else { vec![] };
+
+    // ── Run TCP scanner ──────────────────────────────────────────────────────
     let is_syn = cli
         .scan_type
         .as_deref()
         .map(|s| s.eq_ignore_ascii_case("SYN"))
         .unwrap_or(false);
 
-    // Keep clones for resume book-keeping (scanner takes ownership).
-    let targets_for_resume = if use_resume { targets.clone() } else { vec![] };
-    let ports_for_resume   = if use_resume { ports.clone()   } else { vec![] };
+    let mut results: Vec<scanner::ScanResult> = Vec::new();
 
-    let mut results: Vec<scanner::ScanResult> = if is_syn {
-        match privileges::check_syn_scan_available() {
-            Ok(()) => {
-                #[cfg(feature = "raw_scan")]
-                {
-                    use scanner::syn_scan::SynScanner;
-                    let raw_targets: Vec<std::net::IpAddr> =
-                        targets.iter().map(|t| t.ip).collect();
-                    let syn_scanner = SynScanner {
-                        rate: cli.rate,
-                        timeout_ms: cli.timeout,
-                        workers: cli.workers,
-                        source_ip: cli.source_ip.as_deref().and_then(|s| s.parse().ok()),
-                        interface: cli.interface.clone(),
-                    };
-                    syn_scanner.run(raw_targets, ports.clone()).await?
+    if !tcp_ports.is_empty() {
+        let mut tcp_results: Vec<scanner::ScanResult> = if is_syn {
+            match privileges::check_syn_scan_available() {
+                Ok(()) => {
+                    #[cfg(feature = "raw_scan")]
+                    {
+                        use scanner::syn_scan::SynScanner;
+                        let raw_targets: Vec<std::net::IpAddr> =
+                            targets.iter().map(|t| t.ip).collect();
+                        let syn_scanner = SynScanner {
+                            rate: cli.rate,
+                            timeout_ms: cli.timeout,
+                            workers: cli.workers,
+                            source_ip: cli.source_ip.as_deref().and_then(|s| s.parse().ok()),
+                            interface: cli.interface.clone(),
+                        };
+                        syn_scanner.run(raw_targets, tcp_ports.clone()).await?
+                    }
+                    #[cfg(not(feature = "raw_scan"))]
+                    {
+                        eprintln!(
+                            "Warning: raw_scan feature not compiled in. \
+                             Falling back to CONNECT scan."
+                        );
+                        run_connect_scan(
+                            targets.clone(),
+                            tcp_ports.clone(),
+                            cli.rate,
+                            cli.workers,
+                            cli.timeout,
+                            cli.retries,
+                            cli.port_threshold,
+                            &resume_state,
+                            use_resume,
+                        )
+                        .await?
+                    }
                 }
-                #[cfg(not(feature = "raw_scan"))]
-                {
+                Err(reason) => {
                     eprintln!(
-                        "Warning: raw_scan feature not compiled in. \
-                         Falling back to CONNECT scan."
+                        "Warning: SYN scan not available ({}). \
+                         Falling back to CONNECT scan.",
+                        reason
                     );
                     run_connect_scan(
                         targets.clone(),
-                        ports.clone(),
+                        tcp_ports.clone(),
                         cli.rate,
                         cli.workers,
                         cli.timeout,
@@ -235,40 +274,43 @@ async fn main() -> Result<()> {
                     .await?
                 }
             }
-            Err(reason) => {
-                eprintln!(
-                    "Warning: SYN scan not available ({}). \
-                     Falling back to CONNECT scan.",
-                    reason
-                );
-                run_connect_scan(
-                    targets.clone(),
-                    ports.clone(),
-                    cli.rate,
-                    cli.workers,
-                    cli.timeout,
-                    cli.retries,
-                    cli.port_threshold,
-                    &resume_state,
-                    use_resume,
-                )
-                .await?
-            }
+        } else {
+            run_connect_scan(
+                targets.clone(),
+                tcp_ports.clone(),
+                cli.rate,
+                cli.workers,
+                cli.timeout,
+                cli.retries,
+                cli.port_threshold,
+                &resume_state,
+                use_resume,
+            )
+            .await?
+        };
+        results.append(&mut tcp_results);
+    }
+
+    // ── Run UDP scanner ──────────────────────────────────────────────────────
+    if !udp_ports.is_empty() {
+        if !cli.silent {
+            eprintln!("[INFO] Starting UDP scan on {} port(s)...", udp_ports.len());
         }
-    } else {
-        run_connect_scan(
-            targets.clone(),
-            ports.clone(),
-            cli.rate,
-            cli.workers,
-            cli.timeout,
-            cli.retries,
-            cli.port_threshold,
-            &resume_state,
-            use_resume,
-        )
-        .await?
-    };
+
+        let udp_scanner = UdpScanner {
+            // UDP scanning is slower; cap default rate at 100 pps.
+            rate: cli.rate.min(100),
+            timeout_ms: cli.timeout.max(2000),
+            retries: cli.retries,
+            workers: cli.workers.min(25),
+            // --udp-probes flag: any non-None value enables protocol-specific payloads.
+            use_probes: cli.udp_probes.is_some(),
+        };
+
+        let raw_targets: Vec<std::net::IpAddr> = targets.iter().map(|t| t.ip).collect();
+        let mut udp_results = udp_scanner.run(raw_targets, udp_ports).await?;
+        results.append(&mut udp_results);
+    }
 
     info!("scan complete — {} open ports found", results.len());
 

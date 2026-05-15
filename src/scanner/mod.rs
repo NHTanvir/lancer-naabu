@@ -1,6 +1,7 @@
 pub mod connect;
 pub mod syn_scan;
 pub mod tcp_sequencer;
+pub mod udp_scan;
 
 use crate::port::Port;
 
