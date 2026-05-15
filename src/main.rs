@@ -1,3 +1,4 @@
+mod blackrock;
 mod cli;
 mod host_discovery;
 mod output;
@@ -12,13 +13,41 @@ use clap::Parser;
 use cli::Cli;
 use host_discovery::{HostDiscoveryConfig, discover_hosts};
 use output::{write_results, OutputConfig};
-use port::resolve_ports;
+use port::{Port, resolve_ports};
 use resume::ResumeState;
 use scanner::connect::ConnectScanner;
-use target::resolve_targets;
+use target::{Target, resolve_targets};
 use tracing::info;
 
 const RESUME_FILE: &str = "resume.json";
+
+/// Run a TCP CONNECT scan and return open-port results.
+///
+/// Extracted so that the SYN-scan fallback path can call it without
+/// duplicating the ConnectScanner setup logic.
+async fn run_connect_scan(
+    targets: Vec<Target>,
+    ports: Vec<Port>,
+    rate: u32,
+    workers: usize,
+    timeout_ms: u64,
+    retries: u32,
+    port_threshold: Option<u32>,
+    resume_state: &ResumeState,
+    use_resume: bool,
+) -> Result<Vec<scanner::ScanResult>> {
+    let mut scanner = ConnectScanner::new(targets, ports, rate, workers, timeout_ms, retries);
+
+    if let Some(t) = port_threshold {
+        scanner.port_threshold = t as usize;
+    }
+
+    if use_resume && !resume_state.scanned.is_empty() {
+        scanner.skip_pairs = resume_state.scanned.clone();
+    }
+
+    scanner.run().await
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -159,34 +188,87 @@ async fn main() -> Result<()> {
     }
 
     // ── Run scanner ──────────────────────────────────────────────────────────
-    if cli.scan_type.as_deref().map(|s| s.eq_ignore_ascii_case("SYN")).unwrap_or(false) {
-        eprintln!("Warning: SYN scan is not yet implemented. Falling back to CONNECT.");
-    }
+    let is_syn = cli
+        .scan_type
+        .as_deref()
+        .map(|s| s.eq_ignore_ascii_case("SYN"))
+        .unwrap_or(false);
 
     // Keep clones for resume book-keeping (scanner takes ownership).
     let targets_for_resume = if use_resume { targets.clone() } else { vec![] };
     let ports_for_resume   = if use_resume { ports.clone()   } else { vec![] };
 
-    let mut scanner = ConnectScanner::new(
-        targets.clone(),
-        ports,
-        cli.rate,
-        cli.workers,
-        cli.timeout,
-        cli.retries,
-    );
-
-    // Wire up --port-threshold.
-    if let Some(t) = cli.port_threshold {
-        scanner.port_threshold = t as usize;
-    }
-
-    // Pre-scan: skip already-scanned (host, port) pairs.
-    if use_resume && !resume_state.scanned.is_empty() {
-        scanner.skip_pairs = resume_state.scanned.clone();
-    }
-
-    let mut results = scanner.run().await?;
+    let mut results: Vec<scanner::ScanResult> = if is_syn {
+        match privileges::check_syn_scan_available() {
+            Ok(()) => {
+                #[cfg(feature = "raw_scan")]
+                {
+                    use scanner::syn_scan::SynScanner;
+                    let raw_targets: Vec<std::net::IpAddr> =
+                        targets.iter().map(|t| t.ip).collect();
+                    let syn_scanner = SynScanner {
+                        rate: cli.rate,
+                        timeout_ms: cli.timeout,
+                        workers: cli.workers,
+                        source_ip: cli.source_ip.as_deref().and_then(|s| s.parse().ok()),
+                        interface: cli.interface.clone(),
+                    };
+                    syn_scanner.run(raw_targets, ports.clone()).await?
+                }
+                #[cfg(not(feature = "raw_scan"))]
+                {
+                    eprintln!(
+                        "Warning: raw_scan feature not compiled in. \
+                         Falling back to CONNECT scan."
+                    );
+                    run_connect_scan(
+                        targets.clone(),
+                        ports.clone(),
+                        cli.rate,
+                        cli.workers,
+                        cli.timeout,
+                        cli.retries,
+                        cli.port_threshold,
+                        &resume_state,
+                        use_resume,
+                    )
+                    .await?
+                }
+            }
+            Err(reason) => {
+                eprintln!(
+                    "Warning: SYN scan not available ({}). \
+                     Falling back to CONNECT scan.",
+                    reason
+                );
+                run_connect_scan(
+                    targets.clone(),
+                    ports.clone(),
+                    cli.rate,
+                    cli.workers,
+                    cli.timeout,
+                    cli.retries,
+                    cli.port_threshold,
+                    &resume_state,
+                    use_resume,
+                )
+                .await?
+            }
+        }
+    } else {
+        run_connect_scan(
+            targets.clone(),
+            ports.clone(),
+            cli.rate,
+            cli.workers,
+            cli.timeout,
+            cli.retries,
+            cli.port_threshold,
+            &resume_state,
+            use_resume,
+        )
+        .await?
+    };
 
     info!("scan complete — {} open ports found", results.len());
 
